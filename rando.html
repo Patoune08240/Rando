@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2f6f4f">
+<title>Rando – créer un itinéraire</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+:root{--bg:#fff;--tx:#1d1d1b;--mu:#6b6b66;--bd:#dcdcd6;--sf:#f4f4f0;--ac:#2f6f4f}
+@media (prefers-color-scheme:dark){:root{--bg:#1d1d1b;--tx:#f0efea;--mu:#9a9a92;--bd:#3a3a36;--sf:#2a2a27;--ac:#4c9f75}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--tx)}
+#app{display:flex;height:100%}
+#map{flex:1;min-width:0}
+#pn{width:350px;overflow-y:auto;padding:12px;background:var(--bg);border-left:1px solid var(--bd);display:flex;flex-direction:column;gap:10px}
+@media (max-width:700px){#app{flex-direction:column}#pn{width:auto;max-height:48%;border-left:0;border-top:1px solid var(--bd)}}
+h1{font-size:17px;margin:0}
+small,.mu{color:var(--mu)}
+.g{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.g div{background:var(--sf);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column}
+.g b{font-size:19px}
+.r{display:flex;gap:6px}.r button{flex:1}
+button,input{font:inherit;color:var(--tx)}
+button{background:var(--sf);border:1px solid var(--bd);border-radius:8px;padding:8px 10px;cursor:pointer}
+button.p{background:var(--ac);border-color:var(--ac);color:#fff;font-weight:600}
+select{font:inherit;color:var(--tx);background:var(--sf);border:1px solid var(--bd);border-radius:8px;padding:7px}
+label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--mu)}
+input{background:var(--sf);border:1px solid var(--bd);border-radius:8px;padding:7px}
+#sg{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:4px;font-size:13px}
+#sg li{background:var(--sf);border-radius:8px;padding:6px 8px}
+#gs{font-size:13px}
+#sg button{padding:2px 8px;font-size:12px;margin-top:4px}
+.pin b{display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;background:var(--ac);color:#fff;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.45);font-size:12px}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="map"></div>
+  <aside id="pn">
+    <h1>🥾 Itinéraire de randonnée</h1>
+    <div class="g">
+      <div><small>Distance</small><b id="D">0 km</b></div>
+      <div><small>Durée estimée</small><b id="T">—</b></div>
+      <div><small>Dénivelé +</small><b id="U">—</b></div>
+      <div><small>Dénivelé −</small><b id="N">—</b></div>
+    </div>
+    <small id="es"></small>
+    <label>Tracé<select id="md"><option value="short">Plus court chemin (à pied)</option><option value="trail">Sentiers de randonnée</option><option value="line">Ligne droite</option></select></label>
+    <label>Vitesse de marche (km/h)<input id="sp" type="number" min="1" max="10" step=".5"></label>
+    <div class="r"><button id="un">↶ Annuler</button><button id="cl">Effacer</button><button id="gx">Export GPX</button></div>
+    <div class="r"><button id="gps" class="p">▶ Suivre avec le GPS</button><button id="rc" style="flex:0 0 auto">◎</button></div>
+    <div id="gs"></div>
+    <ol id="sg"></ol>
+    <small>Touchez ou cliquez la carte pour ajouter un point. Glissez un point pour le déplacer, touchez-le pour le supprimer. Durée : règle de Naismith (vitesse choisie + 1 h par 600 m de montée). Le tracé suit les chemins et routes d’OpenStreetMap (le plus court par défaut) et revient en ligne droite si aucun chemin n’est trouvé.</small>
+  </aside>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+const $=id=>document.getElementById(id),R=6371000,rad=Math.PI/180;
+const hav=(a,b)=>{const dl=(b.lat-a.lat)*rad,dn=(b.lng-a.lng)*rad,x=Math.sin(dl/2)**2+Math.cos(a.lat*rad)*Math.cos(b.lat*rad)*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.sqrt(x))};
+const ft=h=>{const m=Math.round(h*60);return Math.floor(m/60)+" h "+String(m%60).padStart(2,"0")};
+const key=p=>p.lat.toFixed(5)+","+p.lng.toFixed(5);
+let pts=[],dense=[],wi=[],stats=null,speed=4.5,markers=[],eleCache=new Map(),rid=0,timer,eleState="",mode="short",rc=new Map(),cid=0,routeMsg="";
+
+/* Carte */
+const map=L.map("map").setView([46.6,2.4],6);
+const web=location.protocol.indexOf("http")===0;
+const esri=L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",{maxZoom:18,attribution:"Tiles © Esri"}).addTo(map);
+const topo=L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",{maxZoom:17,attribution:"© OpenTopoMap, © OpenStreetMap"});
+const bases={"Topo (Esri)":esri,"Relief (OpenTopoMap)":topo};
+if(web)bases["OpenStreetMap"]=L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"© OpenStreetMap"});
+L.control.layers(bases).addTo(map);
+const line=L.polyline([],{color:"#d9480f",weight:5}).addTo(map);
+map.on("click",e=>{pts.push({lat:e.latlng.lat,lng:e.latlng.lng});changed()});
+
+/* Sauvegarde locale */
+const sv=()=>{try{localStorage.setItem("rando",JSON.stringify({pts,speed,mode,v2:1}))}catch(e){}};
+try{const r=JSON.parse(localStorage.getItem("rando")||"null");if(r){pts=r.pts||[];speed=r.speed||4.5;mode=r.v2?r.mode:"short"}}catch(e){}
+$("sp").value=speed;$("md").value=mode;
+
+function drawMarkers(){
+  markers.forEach(m=>m.remove());
+  markers=pts.map((p,i)=>{
+    const m=L.marker(p,{draggable:true,icon:L.divIcon({className:"pin",html:"<b>"+(i+1)+"</b>",iconSize:[26,26]})}).addTo(map);
+    m.on("dragend",()=>{const l=m.getLatLng();pts[i]={lat:l.lat,lng:l.lng};changed()});
+    const b=document.createElement("button");b.textContent="Supprimer le point "+(i+1);
+    b.onclick=()=>{pts.splice(i,1);map.closePopup();changed()};
+    m.bindPopup(b);return m;
+  });
+}
+const rkey=(a,b,m=mode)=>key(a)+"|"+key(b)+"|"+m;
+const sl=new Set(),sk=(a,b)=>key(a)+"|"+key(b);
+function tg(i){const k=sk(pts[i],pts[i+1]);sl.has(k)?sl.delete(k):sl.add(k);changed()}
+function geo(i){
+  const a=pts[i],b=pts[i+1],st=[[a.lat,a.lng],[b.lat,b.lng]];
+  return mode==="line"||sl.has(sk(a,b))?st:(rc.get(rkey(a,b))||st);
+}
+const plen=g=>{let t=0;for(let j=1;j<g.length;j++)t+=hav({lat:g[j-1][0],lng:g[j-1][1]},{lat:g[j][0],lng:g[j][1]});return t};
+let lastErr="";
+async function tryBr(p1,p2,prof){
+  try{
+    const r=await fetch("https://brouter.de/brouter?lonlats="+p1+"|"+p2+"&profile="+prof+"&alternativeidx=0&format=geojson");
+    if(!r.ok){lastErr="BRouter "+prof+" : HTTP "+r.status;return null}
+    const j=await r.json(),g=j.features[0].geometry.coordinates.map(c=>[c[1],c[0]]);
+    g.src="BRouter "+prof;return g;
+  }catch(e){lastErr="BRouter "+prof+" : "+(e.message||"réseau");return null}
+}
+async function tryFoot(p1,p2){
+  try{
+    const r=await fetch("https://routing.openstreetmap.de/routed-foot/route/v1/driving/"+p1+";"+p2+"?overview=full&geometries=geojson");
+    if(!r.ok){lastErr="OSM piéton : HTTP "+r.status;return null}
+    const j=await r.json(),g=j.routes[0].geometry.coordinates.map(c=>[c[1],c[0]]);
+    g.src="OSM piéton";return g;
+  }catch(e){lastErr="OSM piéton : "+(e.message||"réseau");return null}
+}
+async function route(a,b){
+  const m=mode,p1=a.lng.toFixed(6)+","+a.lat.toFixed(6),p2=b.lng.toFixed(6)+","+b.lat.toFixed(6);
+  let g;
+  if(m==="short"){
+    const r=(await Promise.all([tryFoot(p1,p2),tryBr(p1,p2,"shortest"),tryBr(p1,p2,"trekking"),tryBr(p1,p2,"hiking-mountain")])).filter(Boolean);
+    g=r.sort((x,y)=>plen(x)-plen(y))[0];
+  }else g=await tryBr(p1,p2,"hiking-mountain")||await tryBr(p1,p2,"trekking")||await tryFoot(p1,p2);
+  if(g)rc.set(rkey(a,b,m),g);
+  return g?g.src:"";
+}
+function resample(g,step,out){
+  let since=0;
+  for(let j=1;j<g.length;j++){
+    const a={lat:g[j-1][0],lng:g[j-1][1]},b={lat:g[j][0],lng:g[j][1]},L=hav(a,b);let off=0;
+    while(since+L-off>=step){off+=step-since;since=0;const f=L?off/L:0;out.push({lat:a.lat+(b.lat-a.lat)*f,lng:a.lng+(b.lng-a.lng)*f})}
+    since+=L-off;
+  }
+  const z=g[g.length-1];out.push({lat:z[0],lng:z[1]});
+}
+function buildDense(){
+  dense=[];wi=[];if(!pts.length)return;
+  const gs=[];for(let i=0;i<pts.length-1;i++)gs.push(geo(i));
+  let tot=0;gs.forEach(g=>{for(let j=1;j<g.length;j++)tot+=hav({lat:g[j-1][0],lng:g[j-1][1]},{lat:g[j][0],lng:g[j][1]})});
+  const step=Math.max(50,tot/1500);
+  dense.push({lat:pts[0].lat,lng:pts[0].lng});wi.push(0);
+  gs.forEach(g=>{resample(g,step,dense);wi.push(dense.length-1)});
+}
+function refresh(pend){
+  const full=[];for(let i=0;i<pts.length-1;i++)full.push(...geo(i));
+  line.setLatLngs(pts.length>1?full:pts.map(p=>[p.lat,p.lng]));
+  buildDense();
+  dense.forEach(p=>p.ele=eleCache.get(key(p)));
+  const miss=dense.some(p=>typeof p.ele!=="number");
+  eleState=dense.length>1&&miss?"Calcul des altitudes…":"";
+  compute();
+  clearTimeout(timer);if(!pend&&dense.length>1&&miss)timer=setTimeout(fetchEle,300);
+}
+async function changed(){
+  sv();const id=++cid;routeMsg="";drawMarkers();
+  const need=[];
+  if(mode!=="line")for(let i=1;i<pts.length;i++)if(!rc.has(rkey(pts[i-1],pts[i]))&&!sl.has(sk(pts[i-1],pts[i])))need.push(i);
+  refresh(need.length>0);
+  if(!need.length)return;
+  let fails=0;const srcs=new Set();
+  for(const [n,i] of need.entries()){
+    routeMsg="Calcul du chemin ("+(n+1)+"/"+need.length+")…";render();
+    const src=await route(pts[i-1],pts[i]);
+    if(id!==cid)return;
+    if(!src)fails++;else srcs.add(src);
+    refresh(n<need.length-1);
+  }
+  routeMsg=fails?fails+" tronçon(s) sans chemin trouvé ("+lastErr+") : tracé en ligne droite.":"Chemin calculé via "+[...srcs].join(", ")+".";
+  render();
+}
+$("md").onchange=e=>{mode=e.target.value;changed()};
+async function fetchEle(){
+  const id=++rid,miss=[...new Map(dense.filter(p=>!eleCache.has(key(p))).map(p=>[key(p),p])).values()];
+  try{
+    for(let i=0;i<miss.length;i+=100){
+      const c=miss.slice(i,i+100);
+      const r=await fetch("https://api.open-meteo.com/v1/elevation?latitude="+c.map(p=>p.lat.toFixed(5)).join(",")+"&longitude="+c.map(p=>p.lng.toFixed(5)).join(","));
+      const j=await r.json();if(id!==rid)return;
+      c.forEach((p,k)=>eleCache.set(key(p),j.elevation[k]));
+    }
+    eleState="";
+  }catch(e){eleState="Altitudes indisponibles (connexion ?) : dénivelé non calculé."}
+  if(id!==rid)return;
+  dense.forEach(p=>p.ele=eleCache.get(key(p)));compute();
+}
+function compute(){
+  const n=dense.length,hasE=n>1&&dense.every(p=>typeof p.ele==="number");
+  stats={segs:[],D:0,up:0,dn:0,t:0,hasE};
+  let d=0;dense.forEach((p,i)=>{if(i)d+=hav(dense[i-1],p);p.d=d});
+  let cg=0,cl=0;if(n)dense[0].cg=dense[0].cl=0;
+  for(let s=1;s<pts.length;s++){
+    const a=wi[s-1],b=wi[s];let up=0,dn=0,ref=dense[a].ele;
+    if(hasE)for(let i=a+1;i<=b;i++){
+      const e=dense[i].ele;
+      if(Math.abs(e-ref)>=3){if(e>ref)up+=e-ref;else dn+=ref-e;ref=e}
+      dense[i].cg=cg+up;dense[i].cl=cl+dn;
+    }
+    cg+=up;cl+=dn;
+    const dist=dense[b].d-dense[a].d;
+    stats.segs.push({dist,up,dn,t:dist/1000/speed+up/600});
+  }
+  stats.D=n?dense[n-1].d:0;stats.up=cg;stats.dn=cl;
+  stats.t=stats.segs.reduce((a,s)=>a+s.t,0);
+  render();
+}
+function render(){
+  const s=stats,e=s.hasE;
+  $("D").textContent=(s.D/1000).toFixed(2)+" km";
+  $("T").textContent=s.D?ft(s.t):"—";
+  $("U").textContent=e?"+"+Math.round(s.up)+" m":"—";
+  $("N").textContent=e?"−"+Math.round(s.dn)+" m":"—";
+  $("es").textContent=[routeMsg,eleState].filter(Boolean).join(" ");
+  $("sg").innerHTML=s.segs.map((g,i)=>{const st=sl.has(sk(pts[i],pts[i+1]));return "<li><b>"+(i+1)+" → "+(i+2)+"</b> · "+(g.dist/1000).toFixed(2)+" km <span class=\"mu\">(à vol d’oiseau "+(hav(pts[i],pts[i+1])/1000).toFixed(2)+" km)</span>"+(e?" · +"+Math.round(g.up)+" m / −"+Math.round(g.dn)+" m":"")+" · "+ft(g.t)+(mode==="line"?"":"<br><button onclick=\"tg("+i+")\">"+(st?"Suivre le chemin":"Forcer la ligne droite")+"</button>")+"</li>"}).join("");
+}
+$("sp").oninput=e=>{speed=Math.max(1,+e.target.value||4.5);sv();if(stats)compute()};
+$("un").onclick=()=>{pts.pop();changed()};
+$("cl").onclick=()=>{if(pts.length&&confirm("Effacer tout l’itinéraire ?")){pts=[];changed()}};
+
+/* Export GPX */
+$("gx").onclick=()=>{
+  if(dense.length<2)return;
+  const e=p=>typeof p.ele==="number"?"<ele>"+p.ele.toFixed(1)+"</ele>":"";
+  const g='<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Rando" xmlns="http://www.topografix.com/GPX/1/1">\n'
+   +pts.map((p,i)=>'<wpt lat="'+p.lat+'" lon="'+p.lng+'"><name>Point '+(i+1)+"</name></wpt>").join("\n")
+   +"\n<trk><name>Itinéraire</name><trkseg>\n"+dense.map(p=>'<trkpt lat="'+p.lat+'" lon="'+p.lng+'">'+e(p)+"</trkpt>").join("\n")+"\n</trkseg></trk></gpx>";
+  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([g],{type:"application/gpx+xml"}));a.download="itineraire.gpx";a.click();
+};
+
+/* Suivi GPS */
+let wid=null,dot,acc,follow=true,lock;
+$("gps").onclick=()=>{
+  if(wid!==null){stopGps();return}
+  if(!navigator.geolocation){$("gs").textContent="GPS indisponible sur cet appareil.";return}
+  follow=true;$("gs").textContent="Recherche de la position…";
+  wid=navigator.geolocation.watchPosition(onPos,e=>{$("gs").textContent=e.code===1?"Position refusée. Autorisez la localisation (la page doit être en HTTPS).":"Position indisponible."},{enableHighAccuracy:true,maximumAge:2000,timeout:20000});
+  $("gps").textContent="■ Arrêter le GPS";
+  if(navigator.wakeLock)navigator.wakeLock.request("screen").then(l=>lock=l).catch(()=>{});
+};
+function stopGps(){
+  navigator.geolocation.clearWatch(wid);wid=null;$("gps").textContent="▶ Suivre avec le GPS";
+  if(lock)lock.release();if(dot){dot.remove();acc.remove();dot=acc=null}$("gs").textContent="";
+}
+$("rc").onclick=()=>{follow=true;if(dot)map.setView(dot.getLatLng(),Math.max(map.getZoom(),16))};
+map.on("dragstart",()=>follow=false);
+function onPos(p){
+  const c=p.coords,ll=[c.latitude,c.longitude];
+  if(!dot){dot=L.circleMarker(ll,{radius:8,color:"#fff",weight:3,fillColor:"#1971c2",fillOpacity:1}).addTo(map);acc=L.circle(ll,{radius:c.accuracy,color:"#1971c2",weight:1,fillOpacity:.1}).addTo(map)}
+  else{dot.setLatLng(ll);acc.setLatLng(ll);acc.setRadius(c.accuracy)}
+  if(follow)map.setView(ll,Math.max(map.getZoom(),16));
+  progress(ll,c);
+}
+function progress(ll,c){
+  const o="GPS ±"+Math.round(c.accuracy)+" m";
+  if(dense.length<2){$("gs").textContent=o;return}
+  const k=Math.cos(ll[0]*rad),X=g=>g*111320*k,Y=a=>a*110540,px=X(ll[1]),py=Y(ll[0]);
+  let best=1e12,bs=0,bi=0;
+  for(let i=1;i<dense.length;i++){
+    const a=dense[i-1],b=dense[i],ax=X(a.lng),ay=Y(a.lat),dx=X(b.lng)-ax,dy=Y(b.lat)-ay,l2=dx*dx+dy*dy;
+    const t=l2?Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/l2)):0,dd=Math.hypot(px-ax-t*dx,py-ay-t*dy);
+    if(dd<best){best=dd;bs=a.d+t*(b.d-a.d);bi=t<.5?i-1:i}
+  }
+  const last=dense[dense.length-1],rem=last.d-bs;
+  let t=rem/1000/speed;if(stats&&stats.hasE)t+=(last.cg-dense[bi].cg)/600;
+  $("gs").innerHTML=o+"<br>Parcouru : "+(bs/1000).toFixed(2)+" km · Reste : "+(rem/1000).toFixed(2)+" km · ~"+ft(t)
+    +(best>60?"<br><b style=\"color:#e03131\">⚠ Hors itinéraire ("+Math.round(best)+" m)</b>":"");
+}
+
+changed();
+if(pts.length>1)map.fitBounds(line.getBounds(),{padding:[40,40]});else if(pts.length)map.setView(pts[0],13);
+</script>
+</body>
+</html>
